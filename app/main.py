@@ -1,5 +1,6 @@
 """FastAPI 入口：POST /v1/assign 离线色谱峰归属、
-POST /v1/standard-addition 标准加入法定量。"""
+POST /v1/standard-addition 标准加入法定量、
+POST /v1/integrate 原始采样峰面积积分。"""
 
 from __future__ import annotations
 
@@ -7,9 +8,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .assignment import AssignmentError, assign_peaks
+from .integration import IntegrationError, integrate_peaks
 from .models import (
     AssignRequest,
     AssignResponse,
+    IntegrateRequest,
+    IntegrateResponse,
     StandardAdditionRequest,
     StandardAdditionResponse,
 )
@@ -18,7 +22,10 @@ from .standard_addition import standard_addition
 app = FastAPI(
     title="离线色谱峰归属 API",
     version="1.0.0",
-    description="基于两对互异内标的正斜率仿射校准与保序一对一峰归属。",
+    description=(
+        "基于两对互异内标的正斜率仿射校准与保序一对一峰归属；"
+        "原始强度采样峰面积积分；标准加入法定量。"
+    ),
 )
 
 
@@ -27,6 +34,13 @@ async def assignment_error_handler(
     request: Request, exc: AssignmentError
 ) -> JSONResponse:
     # 业务规则不满足与 Pydantic 校验失败一致，统一返回 422。
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(IntegrationError)
+async def integration_error_handler(
+    request: Request, exc: IntegrationError
+) -> JSONResponse:
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
@@ -60,4 +74,14 @@ async def standard_addition_endpoint(request: StandardAdditionRequest) -> dict:
         is_ref_id_2=request.is_ref_id_2,
         tolerance_ms=request.tolerance_ms,
         injections=[inj.model_dump() for inj in request.injections],
+    )
+
+
+@app.post("/v1/integrate", response_model=IntegrateResponse)
+async def integrate(request: IntegrateRequest) -> dict:
+    return integrate_peaks(
+        samples=[s.model_dump() for s in request.samples],
+        start_index=request.start_index,
+        end_index=request.end_index,
+        peak_indices=list(request.peak_indices),
     )

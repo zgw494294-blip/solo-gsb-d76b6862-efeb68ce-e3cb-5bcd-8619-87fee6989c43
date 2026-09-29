@@ -91,3 +91,48 @@ class StandardAdditionResponse(BaseModel):
     # 原样浓度 = intercept / slope
     sample_concentration: FractionOut
     residuals: list[ResidualOut]
+
+
+# ---------------------------------------------------------------------------
+# 原始采样峰面积积分（POST /v1/integrate）
+# ---------------------------------------------------------------------------
+
+class IntensitySample(BaseModel):
+    time_ms: StrictInt
+    intensity: StrictInt = Field(ge=0)
+
+
+class IntegrateRequest(BaseModel):
+    # 5～500 个原始采样点；time_ms 必须严格递增
+    samples: list[IntensitySample] = Field(min_length=5, max_length=500)
+    # 积分起止下标（0 开始，start < end，峰顶须严格位于二者之间）
+    start_index: StrictInt
+    end_index: StrictInt
+    # 2～60 个严格递增峰顶下标；相邻峰顶至少隔一个内部采样点
+    peak_indices: list[StrictInt] = Field(min_length=2, max_length=60)
+
+
+class SegmentOut(BaseModel):
+    # 段边界（谷点为相邻两段共用），含采样下标与对应时间
+    start_index: int
+    end_index: int
+    start_time_ms: int
+    end_time_ms: int
+    peak_index: int
+    peak_time_ms: int
+    # 减基线、截非负后按实际时间间隔梯形积分得到的约分面积
+    area: FractionOut
+
+
+class IntegratePeakOut(BaseModel):
+    # 结构与 standard-addition 的 MeasuredPeak 一致，可直接喂给定量接口
+    time_ms: int
+    area: int = Field(ge=0)
+
+
+class IntegrateResponse(BaseModel):
+    segments: list[SegmentOut]
+    # 各段面积分母的最小公倍数；area × multiplier 即下方整数面积
+    multiplier: int
+    # 按峰顶时间升序的整数峰（零面积保留）
+    peaks: list[IntegratePeakOut]
