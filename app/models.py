@@ -91,3 +91,42 @@ class StandardAdditionResponse(BaseModel):
     # 原样浓度 = intercept / slope
     sample_concentration: FractionOut
     residuals: list[ResidualOut]
+
+
+# ---------------------------------------------------------------------------
+# 峰面积积分（POST /v1/integrate）
+# ---------------------------------------------------------------------------
+
+class IntegrationSample(BaseModel):
+    time_ms: StrictInt
+    # 原始色谱强度：非负整数
+    intensity: StrictInt = Field(ge=0)
+
+
+class IntegrateRequest(BaseModel):
+    # 原始强度采样点，时间须严格递增（业务层校验）
+    samples: list[IntegrationSample] = Field(min_length=5, max_length=500)
+    # 积分起止下标（含），须为合法采样点下标且 start < end
+    start_index: StrictInt = Field(ge=0)
+    end_index: StrictInt = Field(ge=0)
+    # 严格递增的峰顶下标；须严格位于起止之间，
+    # 且相邻峰顶至少隔一个内部采样点（业务层校验）
+    apex_indices: list[StrictInt] = Field(min_length=2, max_length=60)
+
+
+class SegmentOut(BaseModel):
+    # 段的起止采样点下标（含）；相邻段共用分界点
+    start_index: int
+    end_index: int
+    area: FractionOut
+
+
+class IntegrateResponse(BaseModel):
+    # 与峰顶下标同序，每峰一段
+    segments: list[SegmentOut]
+    # 全部面积分母的最小公倍数：peaks 面积 = 段面积 × area_scale
+    area_scale: int
+    # 按峰顶时间排序的整数峰数组（零面积保留），可直接作为
+    # /v1/standard-addition 的 measured_peaks；
+    # 其 time_ms 序列可作为 /v1/assign 的 measured_times_ms
+    peaks: list[MeasuredPeak]

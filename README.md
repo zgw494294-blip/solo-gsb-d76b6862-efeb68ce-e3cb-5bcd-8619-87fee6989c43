@@ -1,11 +1,14 @@
-# 离线色谱峰归属 / 标准加入法定量 API
+# 离线色谱峰归属 / 标准加入法定量 / 峰面积积分 API
 
 - **峰归属**：基于 **两对互异内标** 对实测色谱峰进行正斜率仿射时间校准，并将实测峰与参考峰做
   **保序、一对一** 的最优归属。
 - **标准加入法定量**：对 3～12 次加标进样逐次复用上述归属定位目标峰，以第一枚内标面积归一化后，
   对 (加标浓度, 面积比) 做含截距精确最小二乘，给出斜率、截距与原样浓度。
+- **峰面积积分**：对原始色谱强度采样按峰顶分段（相邻峰顶间取强度最低的内部点为共用分界），
+  逐段扣端点连线基线、截非负后按实际时间间隔精确梯形积分，输出约分分数面积与
+  统一放大的整数峰数组。
 
-Python 3.12 + FastAPI，全部时间/偏差/拟合计算使用 `fractions.Fraction` 精确有理数，
+Python 3.12 + FastAPI，全部时间/偏差/拟合/面积计算使用 `fractions.Fraction` 精确有理数，
 返回约分后的 `n/d`。
 
 ## 一条命令启动
@@ -17,6 +20,7 @@ docker compose up --build -d
 - 本地端口：**http://localhost:8000**
 - 峰归属：`POST http://localhost:8000/v1/assign`
 - 标准加入法定量：`POST http://localhost:8000/v1/standard-addition`
+- 峰面积积分：`POST http://localhost:8000/v1/integrate`
 - 健康检查：`GET http://localhost:8000/health`
 - 交互文档：`http://localhost:8000/docs`（Swagger UI）
 
@@ -254,6 +258,145 @@ curl -s http://localhost:8000/v1/standard-addition \
 - 最小二乘斜率不为正（≤ 0），或截距为负；
 - 进样数不在 3～12、单次实测峰数不在 2～60、负浓度/负面积，以及严格类型错误或缺字段。
 
+## `POST /v1/integrate`（峰面积积分）
+
+对原始色谱强度采样做逐段基线校正梯形积分：
+
+1. **分段**：相邻峰顶之间的内部采样点中取强度最低者为**共用分界**（并列取最早下标）；
+   积分起止下标为最外侧边界，每个峰顶独占一段，相邻段共用分界点。
+2. **基线校正**：每段以两端采样点连线为基线，逐点将强度减基线后**截为非负**。
+3. **精确积分**：按实际时间间隔做梯形积分，全程 `fractions.Fraction` 精确有理数。
+4. **整数放大**：用全部面积分母的**最小公倍数**统一放大，得到整数面积峰数组
+   （`峰面积 = 段面积 × area_scale`）。
+
+### 请求
+
+`Content-Type: application/json`
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `samples` | 数组，长度 **5～500** | 每项 `{time_ms: 整数, intensity: 非负整数}`；`time_ms` **严格递增** |
+| `start_index` / `end_index` | 非负整数 | 积分起止采样点下标（含端点），须 `< len(samples)` 且 `start_index < end_index` |
+| `apex_indices` | 整数数组，长度 **2～60** | **严格递增**的峰顶下标；须**严格**位于起止之间，且相邻峰顶至少隔一个内部采样点 |
+
+```bash
+curl -s http://localhost:8000/v1/integrate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "samples": [
+      {"time_ms": 0,   "intensity": 2},
+      {"time_ms": 10,  "intensity": 5},
+      {"time_ms": 20,  "intensity": 9},
+      {"time_ms": 30,  "intensity": 5},
+      {"time_ms": 40,  "intensity": 3},
+      {"time_ms": 50,  "intensity": 4},
+      {"time_ms": 60,  "intensity": 8},
+      {"time_ms": 70,  "intensity": 2},
+      {"time_ms": 80,  "intensity": 5},
+      {"time_ms": 90,  "intensity": 3},
+      {"time_ms": 100, "intensity": 2}
+    ],
+    "start_index": 0,
+    "end_index": 10,
+    "apex_indices": [2, 6, 8]
+  }'
+```
+
+峰顶 2 与 6 之间的内部点 3、4、5 强度为 5、3、4，最低点 4 为共用分界；
+峰顶 6 与 8 之间唯一内部点 7 为第二处分界。三段 `[0,4]`、`[4,7]`、`[7,10]`
+的面积约分后均为整数，故放大倍数为 1：
+
+```json
+{
+  "segments": [
+    {"start_index": 0, "end_index": 4, "area": {"n": 115, "d": 1}},
+    {"start_index": 4, "end_index": 7, "area": {"n": 70, "d": 1}},
+    {"start_index": 7, "end_index": 10, "area": {"n": 40, "d": 1}}
+  ],
+  "area_scale": 1,
+  "peaks": [
+    {"time_ms": 20, "area": 115},
+    {"time_ms": 60, "area": 70},
+    {"time_ms": 80, "area": 40}
+  ]
+}
+```
+
+非整数面积示例：采样 `(0,1),(3,4),(4,2),(7,5),(10,0)`、起止 `0,4`、峰顶 `[1,3]`，
+两段面积分别为 `9/2` 与 `12`，分母最小公倍数为 2：
+
+```json
+{
+  "segments": [
+    {"start_index": 0, "end_index": 2, "area": {"n": 9, "d": 2}},
+    {"start_index": 2, "end_index": 4, "area": {"n": 12, "d": 1}}
+  ],
+  "area_scale": 2,
+  "peaks": [
+    {"time_ms": 3, "area": 9},
+    {"time_ms": 7, "area": 24}
+  ]
+}
+```
+
+### 响应字段
+
+- `segments`：与 `apex_indices` **同序**，每峰一段；`start_index` / `end_index` 为段边界的
+  采样点下标（相邻段共用分界点），`area` 为约分分数 `{"n", "d"}`，分母恒正。
+- `area_scale`：全部面积分母的最小公倍数（整数，≥ 1）。
+- `peaks`：按**峰顶时间**排序的 `{time_ms, area}` 整数峰数组，
+  `area = 段面积 × area_scale`；**零面积的峰保留**在数组中。
+
+### 与既有接口衔接
+
+`peaks` 的形状与 `/v1/standard-addition` 的 `measured_peaks` 完全一致，
+其 `time_ms` 序列可直接作为 `/v1/assign` 的 `measured_times_ms`。
+以下衔接示例假设已把上面的积分响应保存在 shell 变量 `RESP` 中
+（`RESP=$(curl -s ... /v1/integrate ...)`），并依赖 `jq` 组装请求体：
+
+```bash
+# 积分 -> 峰归属：峰顶时间序列作为 measured_times_ms
+echo "$RESP" | jq '{
+  reference_peaks: [{id:"T",time_ms:20},{id:"S1",time_ms:60},{id:"S2",time_ms:80}],
+  measured_times_ms: [.peaks[].time_ms],
+  is_ref_id_1: "S1", is_meas_idx_1: 1,
+  is_ref_id_2: "S2", is_meas_idx_2: 2,
+  tolerance_ms: 0
+}' | curl -s http://localhost:8000/v1/assign \
+  -H 'Content-Type: application/json' -d @-
+# => {"assignments":[0,1,2], ...}
+
+# 积分 -> 标准加入法定量：峰数组作为各次进样的 measured_peaks
+# （演示用：令目标峰面积随加标浓度线性 +100/浓度；实际使用中应对每次
+#   加标进样分别调用 /v1/integrate 取各自的 peaks）
+echo "$RESP" | jq '. as $r | {
+  reference_peaks: [{id:"T",time_ms:20},{id:"S1",time_ms:60},{id:"S2",time_ms:80}],
+  target_ref_id: "T",
+  is_ref_id_1: "S1", is_ref_id_2: "S2",
+  tolerance_ms: 0,
+  injections: [0, 5, 10] | map(. as $c | {
+    added_concentration: $c,
+    measured_peaks: ($r.peaks | .[0].area += 100 * $c),
+    is_meas_idx_1: 1, is_meas_idx_2: 2
+  })
+}' | curl -s http://localhost:8000/v1/standard-addition \
+  -H 'Content-Type: application/json' -d @-
+# => {"slope":{"n":10,"d":7},"intercept":{"n":23,"d":14},
+#     "sample_concentration":{"n":23,"d":20}, ...}
+```
+
+端到端可运行版本见 `tests/test_integration_api.py` 的衔接测试。
+
+### 错误处理（HTTP 422）
+
+以下情况均返回 `422 Unprocessable Entity`，响应体为 `{"detail": "原因"}`：
+
+- 采样点数为 5～500 之外、`time_ms` 非严格递增、`intensity` 为负；
+- 起止下标越界（`[0, len(samples)-1]`），或 `start_index >= end_index`；
+- 峰顶数量在 2～60 之外、非严格递增、未严格位于起止之间，
+  或相邻峰顶之间没有内部采样点；
+- 类型错误（布尔不会被当作整数、浮点不会被截断为整数）或缺少必填字段。
+
 ## 本地开发与测试
 
 不用 Docker 时：
@@ -268,7 +411,8 @@ pytest -q
 ```
 
 测试包含固定边界用例，以及 400 组随机实例与全局暴力枚举（枚举所有保序配对链）对拍，
-验证“最大配对数 → 最小绝对偏差和 → 字典序最小”三级目标。
+验证“最大配对数 → 最小绝对偏差和 → 字典序最小”三级目标；积分接口另有 300 组随机实例
+与独立浮点参照实现对拍，并含积分 → 归属 / 定量的端到端衔接测试。
 
 ## 目录结构
 
@@ -278,6 +422,7 @@ app/
   models.py             # 严格类型的请求/响应模型
   assignment.py         # 仿射校准 + 区间 DP 归属（纯函数）
   standard_addition.py  # 标准加入法：逐次归属 + 精确最小二乘（纯函数）
+  integration.py        # 峰面积积分：分段 + 扣基线 + 精确梯形积分（纯函数）
 tests/                  # API 测试与算法对拍测试
 Dockerfile
 docker-compose.yml
